@@ -10,7 +10,7 @@
 - [Exercise 1: Kubenet Networking with Custom Subnet](#exercise-kubenet-with-byo-subnet)
 - [Exercise 2: Azure CNI Overlay Networking](#azure-cni-overlay-with-byo-subnet)
 - [Exercise 3: Load Balancer Services (Internal & External)](#create-a-service-with-azure-loadbalancer)
-- [Exercise 4: Web Application Routing (Managed Ingress)](#create-a-cluster-with-web-application-routing)
+- [Exercise 4: Application Routing (Managed Ingress)](#create-a-cluster-with-web-application-routing)
 - [Optional Exercise: Open Service Mesh](#optional-create-a-cluster-with-open-service-mesh)
 
 ## Key Learning Objectives
@@ -22,7 +22,7 @@ By the end of this lab module, you will be able to:
 - Understand the role of route tables, subnets, and NSGs in AKS networking
 - Apply network security policies and traffic management
 
-## Important Notes for Trainees
+## Important Notes for Participants
 > ⚠️ **Resource Management:** Review the node resource group (MC_*) throughout the lab to understand how AKS automatically manages dependent Azure resources  
 > 📝 **Best Practice:** Keep track of created resources for cleanup at the end of the lab  
 > 🔍 **Troubleshooting:** Use `kubectl describe` and Azure portal for detailed resource inspection
@@ -187,6 +187,11 @@ kubectl get nodes -w
 - **DNS Resolution Issues:** Verify dns-service-ip is within service-cidr
 - **Node Communication:** Ensure subnet NSG allows required traffic
 
+### KUBENET WARNING ###
+
+On 31 March 2028, kubenet networking for Azure Kubernetes Service (AKS) will be retired.    
+
+
 ## Exercise 2: Azure CNI Overlay Networking {#azure-cni-overlay-with-byo-subnet}
 
 ### Background and Context
@@ -198,7 +203,7 @@ Azure CNI Overlay is an advanced networking mode that combines the benefits of A
 - **CNI Overlay:** Advanced Container Network Interface with Azure integration
 - **Pod IP Management:** Pods receive IPs from overlay network (not VNet address space)
 - **Node Communication:** Direct VNet integration for nodes
-- **Network Policies:** Full support for Kubernetes network policies
+- **Network Policies:** Suppor for Kubernetes network policies with Cilium datapath  
 - **Multi-Subnet Support:** Ability to span multiple subnets
 
 ### Learning Outcomes
@@ -340,13 +345,15 @@ az vm create \
 > ```
 > 
 > **Option 4: Skip VM Creation (Alternative Testing)**
-> If VM creation continues to fail, you can proceed with the AKS cluster creation and test load balancer connectivity from your local machine or Azure Cloud Shell instead of the VM.
+> If VM creation continues to fail, you can proceed with the AKS cluster creation and test load balancer connectivity from your local machine or Azure Cloud Shell instead of the VM.  
 
 #### 3.2 Configure VM Access
 First, determine your public IP address:
 ```bash
 curl ifconfig.me
 ```
+
+*Use Bastion service when possible. Instead of opening NSG as instructured below*   
 
 Then create NSG rule (replace YOURIPADDRESSHERE with your actual IP):
 ```bash
@@ -507,6 +514,8 @@ kubectl get pods -l app=nginxapp
 
 ### Step 2: Internal Load Balancer Configuration
 
+Review LB in MC resource groups before starting this exercise.  
+
 #### 2.1 Create Internal Load Balancer Service
 
 ```bash
@@ -643,6 +652,7 @@ EOF
 kubectl get svc nginxsvc-external -w
 
 # Once external IP is assigned, test from your local machine
+# This requires opening NSG rules 
 EXTERNAL_IP=$(kubectl get svc nginxsvc-external -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
 curl http://$EXTERNAL_IP
 ```
@@ -654,63 +664,48 @@ Use the Azure Portal to examine:
 3. Load balancing rules for your services
 4. Health probes configuration
 
-### Step 5: Advanced Network Security (Optional)
+### Step 5: External Traffic Policy Demonstration
 
-This section demonstrates advanced networking concepts with NSGs and traffic policies.
+#### 5.4 Test External Traffic Policy with Load Balancer Services
 
-#### 5.1 Create Restrictive Network Security Group
+The `externalTrafficPolicy: Local` setting optimizes external traffic routing by:
+- Preserving client source IP addresses
+- Routing traffic only to nodes with healthy pods
+- Reducing latency by avoiding extra network hops
+
+First, scale the application and manage node scheduling to demonstrate the policy:
 ```bash
-# Create NSG to block VM traffic to specific subnet
-az network nsg create \
-  --resource-group akslabe2rg \
-  --name protectfromvm
-```
+# Scale up the nginx deployment to ensure we have multiple pods
+kubectl scale deployment nginxapp --replicas=4
 
-#### 5.2 Configure NSG Rules via Portal
-1. Navigate to Azure Portal → Network Security Groups → protectfromvm
-2. Add inbound security rule:
-   - **Source:** IP Addresses
-   - **Source IP addresses:** 10.0.3.0/24 (VM subnet)
-   - **Destination:** Any
-   - **Action:** Deny
-   - **Priority:** 100
+# Wait for pods to be ready
+kubectl get pods -l app=nginxapp -w
 
-#### 5.3 Associate NSG with subnet2
-```bash
-az network vnet subnet update \
-  --resource-group akslabe2rg \
-  --vnet-name spokevnet \
-  --name subnet2 \
-  --network-security-group protectfromvm
-```
+# Check current pod distribution across nodes
+kubectl get pods -l app=nginxapp -o wide
 
-#### 5.4 Test Traffic Policy with Local Services
-
-First, manage node scheduling:
-```bash
 # Cordon nodes in subnet2 to make them unschedulable
 kubectl cordon <node-in-subnet2>
 
-# Delete pods to force recreation on subnet1
+# Delete pods to force recreation on subnet1 nodes only
 kubectl delete pods -l app=nginxapp
 
-# Verify pods are now on subnet1 nodes
-kubectl get pods -o wide
+# Wait for pods to be recreated and verify they're all on subnet1 nodes
+kubectl get pods -l app=nginxapp -o wide -w
 ```
 
-Create subnet-specific services with local traffic policy:
+Create subnet-specific services with external traffic policy:
 
 ```bash
 cat <<EOF | kubectl apply -f -
 apiVersion: v1
 kind: Service
 metadata:
-  name: svcsubnet1
+  name: svcdefault
   annotations:
     service.beta.kubernetes.io/azure-load-balancer-internal: "true"
     service.beta.kubernetes.io/azure-load-balancer-internal-subnet: "subnet1"
 spec:
-  internalTrafficPolicy: Local
   type: LoadBalancer
   ports:
   - port: 80
@@ -720,37 +715,416 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: svcsubnet2
+  name: svcetplocal
   annotations:
     service.beta.kubernetes.io/azure-load-balancer-internal: "true"
-    service.beta.kubernetes.io/azure-load-balancer-internal-subnet: "subnet2"
+    service.beta.kubernetes.io/azure-load-balancer-internal-subnet: "subnet1"
 spec:
-  internalTrafficPolicy: Local
+  externalTrafficPolicy: Local
   type: LoadBalancer
   ports:
   - port: 80
   selector:
     app: nginxapp
+```
+![alt text](image.png)  
+![alt text](image-1.png)
+![alt text](image-2.png)
+#### 5.5 Understanding External Traffic Policy Through Load Balancer Analysis
+
+**Step 1: Clean State and Deploy Test Application**
+
+First, let's start with a clean environment:
+```bash
+# Clean up any existing deployments and services
+kubectl delete deployment --all
+kubectl delete service --all
+
+# Create a simple test application with multiple replicas
+kubectl create deployment test-app --image=nginx --replicas=6
+
+# Wait for pods to be ready and check distribution
+kubectl get pods -l app=test-app -o wide
+```
+
+**Step 2: Create Internal Load Balancer Service (Default Policy)**
+
+```bash
+# Create internal load balancer service with default externalTrafficPolicy (Cluster)
+cat <<EOF | kubectl apply -f -
+apiVersion: v1
+kind: Service
+metadata:
+  name: svc-cluster-policy
+  annotations:
+    service.beta.kubernetes.io/azure-load-balancer-internal: "true"
+spec:
+  type: LoadBalancer
+  ports:
+  - port: 80
+  selector:
+    app: test-app
+EOF
+
+# Wait for external IP assignment
+kubectl get svc svc-cluster-policy -w
+```
+
+**Step 3: Analyze Default Load Balancer Configuration**
+
+> 📋 **Analysis Task:** Navigate to the Azure Portal and examine the MC_* resource group:
+> 1. Locate the **Standard Load Balancer** for your cluster
+> 2. Go to **Load balancing rules** → Find the rule for `svc-cluster-policy`
+> 3. Examine:
+>    - **Frontend IP configuration**
+>    - **Backend pool** (should show all cluster nodes)
+>    - **Health probe** configuration
+>    - **Port configuration**
+> 4. Under 'Load balancing rules', Click **Health status** → **View details** to see backend instance states
+> 5. Note that **all nodes appear in the backend pool**
+
+**Step 4: Create Load Balancer Service with Local Traffic Policy**
+
+```bash
+# Create internal load balancer service with externalTrafficPolicy: Local
+cat <<EOF | kubectl apply -f -
+apiVersion: v1
+kind: Service
+metadata:
+  name: svc-local-policy
+  annotations:
+    service.beta.kubernetes.io/azure-load-balancer-internal: "true"
+spec:
+  type: LoadBalancer
+  externalTrafficPolicy: Local
+  ports:
+  - port: 80
+  selector:
+    app: test-app
+EOF
+
+# Wait for external IP assignment
+kubectl get svc svc-local-policy -w
+kubectl cordon nnnnnn1-3 (cordon nodepool2 nodes)
+kubectl drain nnnnnn1-3 --ignore-daemonsets
+```
+
+**Step 5: Analyze Local Traffic Policy Load Balancer Configuration**
+
+> 📋 **Analysis Task:** Return to the Azure Portal and examine the changes:
+> 1. Find the new **Load balancing rule** for `svc-local-policy`
+> 2. Compare with the previous service:
+>    - **Backend pool** (same nodes, but health probe behavior differs)
+>    - **Health probe** (note the different port - this is the HealthCheck NodePort)
+>    - **Health status** → **View details** (some nodes may show as unhealthy)
+> 3. **Key Observation #1:** Notice the **HealthCheck NodePort** in the service description
+> 4. **Key Observation #2:** LB rule for the service with externalTrafficPolicy: Local  has some unhealthy instances
+
+**Step 6: Investigate Health Check Mechanism**
+
+```bash
+# Deploy troubleshooting pod for network analysis
+kubectl run netshoot --image=nicolaka/netshoot --rm -it --restart=Never -- bash
+
+# If the above doesn't work, deploy it as a regular pod
+cat <<EOF | kubectl apply -f -
+apiVersion: v1
+kind: Pod
+metadata:
+  name: netshoot
+spec:
+  containers:
+  - name: netshoot
+    image: nicolaka/netshoot
+    command: ["/bin/bash"]
+    args: ["-c", "sleep 3600"]
 EOF
 ```
 
-#### 5.5 Test Network Policies
-From your test VM, test connectivity:
+**Step 7: Examine Health Check NodePorts**
 
 ```bash
-# This should fail due to NSG blocking VM subnet → subnet2
-curl http://<svcsubnet2-ip>
+# Get service details and extract health check information for svc-local-policy - notice the difference  
+kubectl describe svc svc-cluster-policy
+kubectl describe svc svc-local-policy
 
-# This should work (hit or miss based on node availability)
-curl http://<svcsubnet1-ip>
+# Extract the HealthCheck NodePort (look for the high-numbered port)
+HEALTH_CHECK_PORT=$(kubectl get svc svc-local-policy -o jsonpath='{.spec.healthCheckNodePort}')
+echo "HealthCheck NodePort: $HEALTH_CHECK_PORT"
 
-# Test NodePort access directly
-kubectl get svc  # Note the NodePort values
+# Get node IPs for testing
+kubectl get nodes -o wide
 
-# Should work for subnet1 nodes, fail for subnet2 nodes
-curl http://<node-ip-subnet1>:<nodeport>
-curl http://<node-ip-subnet2>:<nodeport>
+# Store node IPs in variables for easier testing
+NODE1_IP=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}')
+NODE2_IP=$(kubectl get nodes -o jsonpath='{.items[1].status.addresses[?(@.type=="InternalIP")].address}')
+
+echo "Node 1 IP: $NODE1_IP"
+echo "Node 2 IP: $NODE2_IP"
 ```
+
+**Step 8: Test Health Check Endpoints**
+
+```bash
+# From the netshoot pod, test the health check endpoints
+kubectl exec netshoot -- curl -s http://$NODE1_IP:$HEALTH_CHECK_PORT/healthz
+kubectl exec netshoot -- curl -s http://$NODE2_IP:$HEALTH_CHECK_PORT/healthz
+
+# The output should show something like:
+# {
+#   "service": {
+#     "namespace": "default", 
+#     "name": "svc-local-policy"
+#   },
+#   "localEndpoints": 2,
+#   "serviceProxyHealthy": true
+# }
+```
+
+**Expected Health Check Responses:**
+- **Nodes with pods:** `"serviceProxyHealthy": true` and `"localEndpoints": > 0`
+- **Nodes without pods:** `"serviceProxyHealthy": false` and `"localEndpoints": 0`
+
+**Step 9: Deploy Source IP Test Application**
+
+```bash
+# Deploy an application that shows client source IP information
+cat <<EOF | kubectl apply -f -
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: source-ip-test
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: source-ip-test
+  template:
+    metadata:
+      labels:
+        app: source-ip-test
+    spec:
+      containers:
+      - name: source-ip-test
+        image: registry.k8s.io/e2e-test-images/agnhost:2.43
+        ports:
+        - containerPort: 8080
+        command:
+        - /agnhost
+        - netexec
+        - --http-port=8080
+        - --delay-shutdown=1
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: source-ip-cluster-svc
+  annotations:
+    service.beta.kubernetes.io/azure-load-balancer-internal: "true"
+spec:
+  type: LoadBalancer
+  ports:
+  - port: 80
+    targetPort: 8080
+  selector:
+    app: source-ip-test
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: source-ip-local-svc
+  annotations:
+    service.beta.kubernetes.io/azure-load-balancer-internal: "true"
+spec:
+  type: LoadBalancer
+  externalTrafficPolicy: Local
+  ports:
+  - port: 80
+    targetPort: 8080
+  selector:
+    app: source-ip-test
+EOF
+
+# Wait for services to get external IPs
+kubectl get svc source-ip-cluster-svc source-ip-local-svc -w
+```
+
+**Step 10: Test Source IP Preservation**
+
+```bash
+# Get service IPs for testing
+SVC_CLUSTER_IP=$(kubectl get svc source-ip-cluster-svc -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+SVC_LOCAL_IP=$(kubectl get svc source-ip-local-svc -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+
+echo "Cluster Policy Service IP: $SVC_CLUSTER_IP"
+echo "Local Policy Service IP: $SVC_LOCAL_IP"
+
+# Test from netshoot pod - this will show the actual client IP
+echo "=== Testing Cluster Policy (may show SNAT'd IP) ==="
+kubectl exec netshoot -- curl -s $SVC_CLUSTER_IP/clientip
+
+echo ""
+echo "=== Testing Local Policy (should preserve source IP) ==="
+kubectl exec netshoot -- curl -s $SVC_LOCAL_IP/clientip
+
+# Get the netshoot pod IP for comparison
+NETSHOOT_IP=$(kubectl get pod netshoot -o jsonpath='{.status.podIP}')
+echo ""
+echo "Netshoot Pod IP for reference: $NETSHOOT_IP"
+```
+
+**Expected Results:**
+- **Cluster Policy:** May show a different IP (SNAT'd by kube-proxy or node)
+- **Local Policy:** Should show the actual netshoot pod IP (preserved)
+
+**Step 11: Test from VM for Real Client IP**
+
+If you have the test VM from Exercise 2, you can also test from there:
+```bash
+# From your test VM (SSH into it first)
+# Get the VM's internal IP
+VM_INTERNAL_IP=$(hostname -I | awk '{print $1}')
+echo "VM Internal IP: $VM_INTERNAL_IP"
+
+# Test both services
+echo "=== Testing Cluster Policy from VM ==="
+curl -s $SVC_CLUSTER_IP/clientip
+
+echo ""
+echo "=== Testing Local Policy from VM ==="
+curl -s $SVC_LOCAL_IP/clientip
+```
+
+**VM Test Expected Results:**
+- **Cluster Policy:** May show the node IP instead of the VM IP
+- **Local Policy:** Should show the actual VM internal IP ($VM_INTERNAL_IP)
+
+**Step 12: Observe Load Balancer Health Status**
+
+> 📋 **Final Analysis Task:** Return to Azure Portal:
+> 1. Compare **Health status** between both load balancing rules
+> 2. **Cluster Policy:** All nodes should be healthy (green)
+> 3. **Local Policy:** Only nodes with pods should be healthy (green)
+> 4. Unhealthy nodes (red) will not receive traffic for the Local policy service
+
+**Key Learning Points:**
+- **externalTrafficPolicy: Cluster** - All nodes are healthy, traffic can be forwarded internally
+- **externalTrafficPolicy: Local** - Only nodes with local pods are healthy, no internal forwarding
+- **Health Check NodePort** - Special port used by Azure LB to determine node health for Local policy
+- **Source IP Preservation** - Local policy preserves client IP, Cluster policy may SNAT it
+
+**Cleanup:**
+```bash
+# Clean up test resources
+kubectl delete pod netshoot
+kubectl delete svc svc-cluster-policy svc-local-policy source-ip-cluster-svc source-ip-local-svc
+kubectl delete deployment test-app source-ip-test
+```
+
+**Expected Behaviors:**
+- **externalTrafficPolicy: Local** - Load balancer routes traffic to any healthy node, but nodes without pods may reject the traffic at the health check level
+- **externalTrafficPolicy: Cluster** - Traffic can go to any node, with internal forwarding to pods on other nodes if needed
+- **NodePort with Local** - Only responds on nodes with pods (connection refused on nodes without pods)
+- **NodePort with Cluster** - Responds on all nodes, forwards internally if needed
+
+> **Key Learning Point:** The main difference is observed at the **NodePort level** and in **source IP preservation**, not necessarily in load balancer service accessibility. Azure Load Balancer health checks determine which nodes receive traffic based on the health check NodePort status.
+
+### Understanding External Traffic Policy
+
+#### Key Differences: Local vs Cluster
+
+| Aspect | externalTrafficPolicy: Local | externalTrafficPolicy: Cluster |
+|--------|------------------------------|--------------------------------|
+| **Traffic Routing** | Only to nodes with healthy pods | To all nodes in cluster |
+| **Source IP** | Preserved (no SNAT) | May be SNAT'd to node IP |
+| **Load Distribution** | Based on pod distribution across nodes | Even across all nodes |
+| **Health Checks** | Uses HealthCheck NodePort | No special health checks |
+| **Latency** | Lower (no inter-node routing) | Higher (potential extra hops) |
+| **Failure Impact** | Limited to pods on failed nodes | Affects traffic distribution |
+
+#### When to Use Each Policy
+
+**Use `externalTrafficPolicy: Local` when:**
+- Source IP preservation is critical for security/logging
+- You want to minimize network latency
+- You have good pod distribution across nodes
+- You need deterministic traffic routing
+
+**Use `externalTrafficPolicy: Cluster` when:**
+- You need consistent traffic distribution regardless of pod placement
+- Source IP preservation is not important
+- You have uneven pod distribution across nodes
+- You want maximum availability during node failures
+
+#### Best Practices for External Traffic Policy
+
+1. **Pod Distribution**: Use pod anti-affinity or topology spread constraints to ensure even pod distribution when using Local policy:
+
+```yaml
+spec:
+  topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: DoNotSchedule
+    labelSelector:
+      matchLabels:
+        app: your-app
+```
+
+2. **Graceful Shutdown**: Implement proper shutdown handling with preStop hooks:
+
+```yaml
+spec:
+  containers:
+  - name: app
+    lifecycle:
+      preStop:
+        exec:
+          command: ["/bin/sh", "-c", "sleep 10"]
+```
+
+3. **Health Checks**: Configure appropriate readiness and liveness probes
+4. **Monitoring**: Monitor load balancer health check success rates
+
+### Optional: Network Security Group (NSG) Demonstration
+
+If you want to explore **network-level access controls** in addition to Kubernetes traffic policies, you can optionally implement NSG rules:
+
+#### Create Restrictive NSG (Optional)
+```bash
+# Create NSG to demonstrate network-level blocking
+az network nsg create \
+  --resource-group akslabe2rg \
+  --name protectfromvm
+
+# Add rule to block VM subnet traffic to subnet2
+az network nsg rule create \
+  --resource-group akslabe2rg \
+  --nsg-name protectfromvm \
+  --name DenyFromVMSubnet \
+  --protocol Tcp \
+  --direction Inbound \
+  --priority 100 \
+  --source-address-prefix 10.0.3.0/24 \
+  --destination-address-prefix 10.0.2.0/24 \
+  --destination-port-range 80 \
+  --access Deny
+
+# Apply NSG to subnet1 and 2
+az network vnet subnet update \
+  --resource-group akslabe2rg \
+  --vnet-name spokevnet \
+  --name subnet \
+  --network-security-group protectfromvm 
+
+az network vnet subnet update \
+  --resource-group akslabe2rg \
+  --vnet-name spokevnet \
+  --name subnet2 \
+  --network-security-group protectfromvm
+```
+
+**Note:** This NSG configuration is separate from the external traffic policy tests and demonstrates Azure network-level security controls rather than Kubernetes-level traffic policies.
 
 ### Load Balancer Troubleshooting Guide
 
@@ -780,10 +1154,10 @@ curl http://<node-ip-subnet2>:<nodeport>
 5. **Use internal load balancers** for backend services
 6. **Implement proper NSG rules** for security   
 
-## Exercise 4: Web Application Routing (Managed Ingress) {#create-a-cluster-with-web-application-routing}
+## Exercise 4: Application Routing (Managed Ingress) {#create-a-cluster-with-web-application-routing}
 
 ### Background and Context
-Web Application Routing is Azure's fully managed ingress solution for AKS, providing a simplified way to expose HTTP and HTTPS routes to your applications. This managed service eliminates the complexity of manual ingress controller setup and maintenance.
+Application Routing is Azure's fully managed ingress solution for AKS, providing a simplified way to expose HTTP and HTTPS routes to your applications. This managed service eliminates the complexity of manual ingress controller setup and maintenance.
 
 ### Key Concepts to Understand
 - **Managed Ingress Controller:** Azure-managed NGINX ingress controller
@@ -794,39 +1168,46 @@ Web Application Routing is Azure's fully managed ingress solution for AKS, provi
 
 ### Learning Outcomes
 Upon completion of this exercise, you will understand:
-- How to create AKS clusters with fully managed ingress controllers
+- How to enable application routing on existing AKS clusters
 - Configuration of ingress objects for HTTP traffic routing
 - Implementation of path-based routing patterns
 - Integration with Azure networking and DNS services
 - Best practices for ingress controller management
 
-### Step 1: Cluster Creation with Web Application Routing
+### Step 1: Enable Application Routing on Existing Cluster
 
-#### 1.1 Create New Resource Group and Cluster
+#### 1.1 Enable Application Routing
 ```bash
-# Create dedicated resource group for web application routing demo
-az group create --name webapprg --location eastus2
-
-# Create AKS cluster with web application routing enabled
-az aks create \
-  -g webapprg \
-  -n webappaks \
-  -l eastus2 \
-  --enable-addons web_application_routing \
-  --generate-ssh-keys
+# Enable application routing on the existing akscnioverlay cluster
+az aks approuting enable \
+  -g akslabe2rg \
+  -n akscnioverlay 
+# This will take a few minutes to complete
 ```
 
-**Key Configuration Notes:**
-- `--enable-addons web_application_routing` enables the managed ingress controller
-- `--generate-ssh-keys` creates SSH keys for node access if needed
 
-#### 1.2 Configure kubectl Access
+#### 1.2 Verify Application Routing is Enabled
 ```bash
-# Get cluster credentials
-az aks get-credentials -g webapprg -n webappaks --overwrite-existing
-
-# Verify cluster connectivity
+# Verify cluster connectivity (you should already be connected from Exercise 3)
 kubectl cluster-info
+
+# Check if application routing components are deployed
+kubectl get pods -n app-routing-system
+
+#### 1.3 Monitor Application Routing Deployment
+```bash
+
+# Get the ingress controller service information
+kubectl get service -n app-routing-system nginx
+```
+
+#### 1.4 Verify Cluster and Routing Status
+```bash
+# Confirm we're using the akscnioverlay cluster from previous exercises
+kubectl get nodes -o wide
+
+# Check application routing configuration
+az aks show -g akslabe2rg -n akscnioverlay --query "ingressProfile.webAppRouting" -o table
 ```
 
 ### Step 2: Ingress Controller Inspection
@@ -943,6 +1324,7 @@ INGRESS_IP=$(kubectl get svc -n app-routing-system -o jsonpath='{.items[0].statu
 curl http://$INGRESS_IP/testpath
 
 # Or access via web browser
+# If it's external, you need to update inbound rules to allow traffic - since you are using custom VNET model (not AKS managed).  For internal, it's not required since there is generally a peering of AKS VNET to hub VNET and connectivity to on-prem.  
 echo "Access your application at: http://$INGRESS_IP/testpath"
 ```
 
@@ -1088,7 +1470,7 @@ spec:
 EOF
 ```
 
-### Web Application Routing Benefits
+### Application Routing Benefits
 
 1. **Fully Managed:** No manual installation or maintenance required
 2. **Azure Integration:** Seamless integration with Azure services
@@ -1096,7 +1478,7 @@ EOF
 4. **Security:** Built-in security best practices and updates
 5. **Monitoring:** Integration with Azure Monitor and logging
 
-### Best Practices for Web Application Routing
+### Best Practices for Application Routing
 
 1. **Use Path-Based Routing** for microservices architectures
 2. **Implement Health Checks** for backend services
