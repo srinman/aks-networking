@@ -727,9 +727,7 @@ spec:
   selector:
     app: nginxapp
 ```
-![alt text](image.png)  
-![alt text](image-1.png)
-![alt text](image-2.png)
+
 #### 5.5 Understanding External Traffic Policy Through Load Balancer Analysis
 
 **Step 1: Clean State and Deploy Test Application**
