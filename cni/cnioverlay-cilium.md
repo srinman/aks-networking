@@ -17,18 +17,18 @@
 ┌─────────────────────────────────────────────────────────────┐
 │                    Azure CNI Overlay                        │
 ├─────────────────────────────────────────────────────────────┤
-│  Pod-to-Pod Communication (VXLAN Overlay)                  │
+│  Pod-to-Pod Communication                                   │
 │                                                             │
-│  ┌─────────┐    VXLAN     ┌─────────┐    VXLAN     ┌──────┐│
-│  │  Pod A  │ ──────────── │  Node   │ ──────────── │Pod B ││
-│  │10.244.x │              │ Bridge  │              │10.244││
-│  └─────────┘              └─────────┘              └──────┘│
-│       │                       │                       │    │
-│       └───────── Host Network (10.240.x.x) ──────────┘    │
+│  ┌─────────┐              ┌─────────┐              ┌──────┐ │
+│  │  Pod A  │ ──────────── │  Node   │ ──────────── │Pod B │ │
+│  │10.244.x │              │ Bridge  │              │10.244│ │
+│  └─────────┘              └─────────┘              └──────┘ │
+│       │                       │                       │     │
+│       └───────── Host Network (10.240.x.x) ──────────┘      │
 │                                                             │
-│  Role: IPAM (IP Address Management Only)                   │
-│  - Assigns Pod IPs from overlay subnet                     │
-│  - Creates VXLAN tunnels between nodes                     │
+│  Role: IPAM (IP Address Management Only)                    │
+│  - Assigns Pod IPs from overlay subnet                      │
+│                       │
 │  - Basic routing via kernel bridge                         │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -75,13 +75,13 @@
 #### 1. Create CNI Overlay Cluster
 ```bash
 # Create resource group
-az group create --name cni-comparison-rg --location eastus2
+az group create --name democlusterrg --location westus3
 
 # Create CNI Overlay cluster
 az aks create \
     --resource-group cni-comparison-rg \
     --name aks-cni-overlay \
-    --location eastus2 \
+    --location westus3 \
     --network-plugin azure \
     --network-plugin-mode overlay \
     --pod-cidr 10.244.0.0/16 \
@@ -103,6 +103,17 @@ az aks create \
     --network-plugin-mode overlay \
     --network-dataplane cilium \
     --pod-cidr 10.245.0.0/16 \
+    --node-count 2 \
+    --generate-ssh-keys
+
+# Optionally, create kubenet cluster for comparison
+
+ az aks create \
+    --resource-group cni-comparison-rg \
+    --name aks-kubenet \
+    --location westus3 \
+    --network-plugin kubenet \
+    --pod-cidr 10.244.0.0/16 \
     --node-count 2 \
     --generate-ssh-keys
 

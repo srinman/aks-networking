@@ -5,6 +5,7 @@
 > **Estimated Duration:** 60 minutes  
 > **Prerequisites:** 
 > - Existing AKS cluster with Azure CNI Overlay networking (without Cilium datapath)
+> - use cnioverlay-cilium.md instructions to create two clusters aks-cni-overlay and aks-cilium.  we will be using aks-cni-overlay cluster for this lab.
 > - kubectl configured for cluster access
 > - Azure CLI installed and authenticated
 > - Basic knowledge of Kubernetes networking and load balancers
@@ -37,13 +38,32 @@ kubectl get nodes -o wide
 kubectl get configmap -n kube-system | grep azure
 
 # Verify cluster is using CNI Overlay (check for azure-ip-masq-agent-config configmap)
-kubectl get configmap azure-ip-masq-agent-config -n kube-system
+# kubectl get configmap azure-ip-masq-agent-config-reconciled -n kube-system
+kubectl describe configmap azure-ip-masq-agent-config -n kube-system
+
+# For detailed configuration, view the configmap data:
+kubectl get configmap azure-ip-masq-agent-config-reconciled -n kube-system -o yaml
+```
+
+**Understanding the IP Masquerading Configuration:**
+
+The `azure-ip-masq-agent-config-reconciled` ConfigMap controls how traffic is masqueraded (SNAT'd) in your CNI Overlay cluster:
+
+- **`MasqLinkLocal: true`**: Link-local addresses (169.254.0.0/16) are masqueraded when leaving the node. This ensures traffic to Azure metadata services appears to come from the node IP.
+
+- **`NonMasqueradeCIDRs: - 10.244.0.0/16`**: Traffic within the pod CIDR range (10.244.0.0/16) is NOT masqueraded, preserving source IP addresses for pod-to-pod communication.
+
+This configuration enables:
+- Pod-to-pod communication with preserved source IPs
+- Proper external connectivity through node IP masquerading  
+- Correct routing to Azure services via link-local addresses
+
+```bash
 
 # Check for absence of Cilium (should show no Cilium pods)
 kubectl get pods -n kube-system | grep cilium
 
-# Verify you can create services (should show no errors)
-kubectl auth can-i create services
+
 ```
 
 ## Connectivity Testing Setup
@@ -94,18 +114,20 @@ kubectl get pods -n kube-system -o wide | grep azure
 kubectl describe configmap azure-ip-masq-agent-config -n kube-system
 
 # View cluster network info
-kubectl cluster-info dump | grep -i "cluster-cidr\|service-cidr\|pod-cidr"
+# kubectl cluster-info dump | grep -i "cluster-cidr\|service-cidr\|pod-cidr"
+# use az command to check network info- check networkProfile
+az aks show -n clname -g rgname   
 ```
 
 #### 1.2 Deploy Test Workloads for Analysis
 ```bash
 # Create test deployment across multiple nodes
 kubectl create deployment network-test --image=nginx --replicas=4
+```
 
 # Create a debugging pod for network analysis
-kubectl run netshoot --image=nicolaka/netshoot --rm -it --restart=Never -- bash
 
-# If interactive doesn't work, deploy as regular pod
+```bash  
 cat <<EOF | kubectl apply -f -
 apiVersion: v1
 kind: Pod
@@ -137,6 +159,8 @@ kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.a
 echo "=== POD IPs ==="
 kubectl get pods -l app=network-test -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.podIP}{"\n"}{end}'
 ```
+You may see node IPs with kubectl get pods --all-namespaces -o wide      
+Understand why
 
 ### Step 2: Network Connectivity Analysis
 
@@ -156,6 +180,8 @@ kubectl exec netshoot -- ping -c 3 $POD2_IP
 
 # Test HTTP connectivity
 kubectl exec netshoot -- curl -s http://$POD1_IP
+kubectl exec netshoot -- curl -s http://$POD2_IP
+
 ```
 
 #### 2.2 Analyze Network Routes and Interfaces
@@ -185,6 +211,9 @@ kubectl exec netshoot -- nslookup google.com
 # Test service discovery
 kubectl expose deployment network-test --port=80 --type=ClusterIP
 kubectl exec netshoot -- nslookup network-test.default.svc.cluster.local
+
+# Understand how service discovery is helpful with the command below  
+kubectl exec netshoot -- curl -s http://network-test.default.svc.cluster.local
 ```
 
 ### Key Differences: CNI Overlay Behavior
@@ -273,80 +302,27 @@ kubectl describe svc nginxsvc
 SERVICE_IP=$(kubectl get svc nginxsvc -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
 echo "Internal Load Balancer IP: $SERVICE_IP"
 
-# Note: You'll need to access this IP from a VM connected via Azure Bastion
+# Note: You'll need to access this IP from a VM connected via Azure Bastion or from a laptop/desktop that connect to IP from the subnet
 # Example commands to run from Bastion-connected VM:
-# curl http://$SERVICE_IP
-# wget -qO- http://$SERVICE_IP
+curl http://$SERVICE_IP
+wget -qO- http://$SERVICE_IP
 ```
 
 **Alternative Testing Methods:**
 ```bash
-# Option 1: Test from another pod within the cluster
-kubectl run test-pod --image=curlimages/curl --rm -it --restart=Never -- curl http://$SERVICE_IP
+# Option 1: Test from another pod within the cluster - this is not really testing access via LB service you just created - FYI
+kubectl exec netshoot -- curl -s http://$SERVICE_IP
 
-# Option 2: If you have a jump box VM in the VNet
-# SSH to your jump box and run:
-# curl http://$SERVICE_IP
-
-# Option 3: Port-forward for local testing (limited to specific pods)
+# Option 2: Port-forward for local testing (limited to specific pods)  - this is not really testing access via LB service you just created - FYI
 kubectl port-forward svc/nginxsvc 8080:80
 # Then access via: http://localhost:8080
 ```
 
 **Result:** The application should be accessible from within the VNet or through Bastion-connected resources.
 
-### Step 3: Load Balancer Service Creation
+### Step 3: Advanced Internal Load Balancer Scenarios
 
-#### 3.1 Create Internal Load Balancer Service
-
-```bash
-cat <<EOF | kubectl apply -f -
-apiVersion: v1
-kind: Service
-metadata:
-  name: nginxsvc-internal
-  annotations:
-    service.beta.kubernetes.io/azure-load-balancer-internal: "true"
-spec:
-  type: LoadBalancer
-  ports:
-  - port: 80
-  selector:
-    app: nginxapp
-EOF
-```
-
-**Note:** We avoid specifying subnet annotations since participants typically don't have infrastructure layer access to manage subnet configurations.
-
-#### 3.2 Monitor Service Creation
-```bash
-# Watch service status
-kubectl describe svc nginxsvc-internal
-
-# Check all services
-kubectl get svc -w
-```
-
-The service should receive an internal IP from the cluster's VNet address space.
-
-#### 3.3 Test Internal Load Balancer Connectivity
-```bash
-# Get the service IP
-SERVICE_IP=$(kubectl get svc nginxsvc-internal -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
-echo "Internal Load Balancer IP: $SERVICE_IP"
-
-# Test connectivity from within cluster
-kubectl run test-connectivity --image=curlimages/curl --rm -it --restart=Never -- curl http://$SERVICE_IP
-
-# For testing from Azure Bastion-connected VM:
-echo "Access the application via Azure Bastion: http://$SERVICE_IP"
-```
-curl http://$SERVICE_IP_SUBNET2
-```
-
-### Step 4: Advanced Internal Load Balancer Scenarios
-
-#### 4.1 Create Additional Internal Load Balancer for Comparison
+#### 3.1 Create Additional Internal Load Balancer for Comparison
 
 ```bash
 # Create another internal load balancer for testing different configurations
@@ -366,10 +342,10 @@ spec:
 EOF
 ```
 
-#### 4.2 Test Multi-Service Internal Connectivity
+#### 3.2 Test Multi-Service Internal Connectivity
 ```bash
 # Get both internal IPs for testing
-INTERNAL_IP_1=$(kubectl get svc nginxsvc-internal -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+INTERNAL_IP_1=$(kubectl get svc nginxsvc -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
 INTERNAL_IP_2=$(kubectl get svc nginxsvc-secondary -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
 
 echo "Primary Internal LB IP: $INTERNAL_IP_1"
@@ -382,7 +358,7 @@ kubectl run connectivity-test --image=curlimages/curl --rm -it --restart=Never -
 # curl http://$INTERNAL_IP_2
 ```
 
-#### 4.3 Analyze Internal Load Balancer Configuration
+#### 3.3 Analyze Internal Load Balancer Configuration
 Use the Azure Portal to examine:
 1. The Standard Load Balancer created for your cluster (check Frontend IP configurations)
 2. Backend pools pointing to your nodes (all should show private IPs)
@@ -390,9 +366,9 @@ Use the Azure Portal to examine:
 4. Health probes configuration for internal services
 5. Network Security Group rules (should not require public internet access)
 
-### Step 5: External Traffic Policy for Internal Load Balancers
+### Step 4: External Traffic Policy for Internal Load Balancers
 
-#### 5.1 Understanding Traffic Policy for Internal Services
+#### 4.1 Understanding Traffic Policy for Internal Services
 
 The `externalTrafficPolicy: Local` setting works for internal load balancers and optimizes traffic routing by:
 - Preserving client source IP addresses from within the VNet
