@@ -352,7 +352,7 @@ echo "Primary Internal LB IP: $INTERNAL_IP_1"
 echo "Secondary Internal LB IP: $INTERNAL_IP_2"
 
 # Test both services from within cluster
-kubectl run connectivity-test --image=curlimages/curl --rm -it --restart=Never -- sh
+kubectl run netshoot --image=nicolaka/netshoot --rm -it --restart=Never -- bash
 # Inside the pod:
 # curl http://$INTERNAL_IP_1
 # curl http://$INTERNAL_IP_2
@@ -394,8 +394,8 @@ Start with a clean environment for focused testing:
 kubectl delete deployment --all
 kubectl delete service --all
 
-# Create a simple test application with multiple replicas
-kubectl create deployment test-app --image=nginx --replicas=6
+# Create a simple test application with a single replicas
+kubectl create deployment test-app --image=nginx --replicas=1
 
 # Wait for pods to be ready and check distribution
 kubectl get pods -l app=test-app -o wide
@@ -446,21 +446,10 @@ INTERNAL_LB_IP=$(kubectl get svc svc-cluster-policy -o jsonpath='{.status.loadBa
 echo "Internal Load Balancer IP: $INTERNAL_LB_IP"
 
 # Document this IP for Bastion testing
-echo "Access this application via Azure Bastion-connected VM: http://$INTERNAL_LB_IP"
+echo "Access this application via Azure Bastion-connected VM or network connected laptop : http://$INTERNAL_LB_IP"
 ```
 
-**Alternative Testing Methods:**
-```bash
-# Option 1: Test from within the cluster
-kubectl run test-pod --image=curlimages/curl --rm -it --restart=Never -- curl http://$INTERNAL_LB_IP
 
-# Option 2: Port-forward for limited local testing
-kubectl port-forward svc/svc-cluster-policy 8080:80
-# Then access via: http://localhost:8080
-
-# Option 3: If you have a jump box VM in the VNet
-# SSH to your jump box and run: curl http://$INTERNAL_LB_IP
-```
 
 ### 3.5 Create Load Balancer Service with Local Traffic Policy
 
@@ -481,12 +470,13 @@ spec:
   selector:
     app: test-app
 EOF
-
+```
 # Wait for internal IP assignment
+```bash
 kubectl get svc svc-local-policy -w
 ```
-kubectl drain nnnnnn1-3 --ignore-daemonsets
-```
+
+
 
 **Step 5: Analyze Local Traffic Policy Load Balancer Configuration**
 
@@ -495,12 +485,25 @@ kubectl drain nnnnnn1-3 --ignore-daemonsets
 > 2. Compare with the previous service:
 >    - **Backend pool** (same nodes, but health probe behavior differs)
 >    - **Health probe** (note the different port - this is the HealthCheck NodePort)
->    - **Health status** → **View details** (some nodes may show as unhealthy)
+>    - **Health status** → **Load Balancing Rules --> View details** (some nodes may show as unhealthy)
 > 3. **Key Observation #1:** Notice the **HealthCheck NodePort** in the service description
 > 4. **Key Observation #2:** LB rule for the service with externalTrafficPolicy: Local  has some unhealthy instances
 
-**Step 6: Investigate Health Check Mechanism**
+Use this following command to drain pods from all the nodes except one  or you can scale replicas for the deployment
 
+for draining node use the following
+```bash 
+kubectl drain nnnnnn1-3 --ignore-daemonsets
+```
+for scaling replicas, use the following 
+k scale deploy test-app --replicas=2
+check Load Balancing Rules --> View details again (or click Refresh if already in same screen).   This should show only one node state up and others down
+k scale deploy test-app --replicas=1
+
+  
+
+**Step 6: Investigate Health Check Mechanism**  -- OPTIONAL STEP
+ 
 ```bash
 # Deploy troubleshooting pod for network analysis
 kubectl run netshoot --image=nicolaka/netshoot --rm -it --restart=Never -- bash
@@ -520,7 +523,7 @@ spec:
 EOF
 ```
 
-**Step 7: Examine Health Check NodePorts**
+**Step 7: Examine Health Check NodePorts**   -- OPTIONAL STEP   
 
 ```bash
 # Get service details and extract health check information for svc-local-policy - notice the difference  
@@ -678,19 +681,7 @@ echo "=== Testing Local Policy from Bastion-connected VM ==="
 curl -s http://<local-policy-service-ip>/clientip
 ```
 
-**Alternative Testing without Bastion:**
-```bash
-# If Bastion is not available, use kubectl port-forward for testing
-kubectl port-forward svc/source-ip-cluster-svc 8081:80 &
-kubectl port-forward svc/source-ip-local-svc 8082:80 &
 
-# Test locally (this will show your local machine's characteristics)
-curl -s http://localhost:8081/clientip
-curl -s http://localhost:8082/clientip
-
-# Stop port forwarding when done
-pkill -f "kubectl port-forward"
-```
 
 **Bastion Test Expected Results:**
 - **Cluster Policy:** May show the node IP instead of the VM IP
