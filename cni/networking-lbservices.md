@@ -15,17 +15,13 @@
 - [Exercise 1: CNI Overlay Network Analysis](#cni-overlay-network-analysis)
 - [Exercise 2: Advanced Load Balancer Services](#advanced-load-balancer-services)
 - [Exercise 3: Internal Load Balancer and Traffic Policy Analysis](#internal-load-balancer-analysis)
-- [Exercise 4: Network Policy Implementation](#network-policy-implementation)
-- [Exercise 5: Application Routing (Managed Ingress)](#create-a-cluster-with-application-routing)
+
 
 ## Key Learning Objectives
 By the end of this lab module, you will be able to:
 - Analyze Azure CNI Overlay networking behavior in existing clusters
 - Configure advanced load balancer scenarios with traffic policies
-- Implement and test external traffic policy configurations
-- Deploy network policies for pod-to-pod communication control
 - Understand source IP preservation and health check mechanisms
-- Troubleshoot complex networking scenarios in production environments
 
 ## Prerequisites Validation
 Before starting the lab exercises, verify your environment:
@@ -53,10 +49,7 @@ The `azure-ip-masq-agent-config-reconciled` ConfigMap controls how traffic is ma
 
 - **`NonMasqueradeCIDRs: - 10.244.0.0/16`**: Traffic within the pod CIDR range (10.244.0.0/16) is NOT masqueraded, preserving source IP addresses for pod-to-pod communication.
 
-This configuration enables:
-- Pod-to-pod communication with preserved source IPs
-- Proper external connectivity through node IP masquerading  
-- Correct routing to Azure services via link-local addresses
+
 
 ```bash
 
