@@ -75,7 +75,7 @@
 #### 1. Create CNI Overlay Cluster
 ```bash
 # Create resource group
-az group create --name democlusterrg --location westus3
+az group create --name cni-comparison-rg --location westus3
 
 # Create CNI Overlay cluster
 az aks create \
